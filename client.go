@@ -1,7 +1,12 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
+	"log"
 	"net/http"
+	"net/url"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -11,45 +16,12 @@ import (
 var (
 	client *http.Client
 
-	// inFlightGauge = promauto.NewGauge(prometheus.GaugeOpts{
-	// 	Namespace: "http_client",
-	// 	Name:      "in_flight_requests",
-	// 	Help:      "A gauge of in-flight requests for the wrapped client.",
-	// })
-
-	// counter = promauto.NewCounterVec(
-	// 	prometheus.CounterOpts{
-	// 		Namespace: "http_client",
-	// 		Name:      "api_requests_total",
-	// 		Help:      "A counter for requests from the wrapped client.",
-	// 	},
-	// 	[]string{"code", "method"},
-	// )
-
-	// dnsLatencyVec uses custom buckets based on expected dns durations.
-	// It has an instance label "event", which is set in the
-	// DNSStart and DNSDonehook functions defined in the
-	// InstrumentTrace struct below.
 	dnsLatencyVec = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "http_client",
 			Name:      "dns_duration_seconds",
 			Help:      "Trace dns latency histogram.",
 			Buckets:   []float64{.005, .01, .025, .05},
-		},
-		[]string{"event"},
-	)
-
-	// tlsLatencyVec uses custom buckets based on expected tls durations.
-	// It has an instance label "event", which is set in the
-	// TLSHandshakeStart and TLSHandshakeDone hook functions defined in the
-	// InstrumentTrace struct below.
-	tlsLatencyVec = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "http_client",
-			Name:      "tls_duration_seconds",
-			Help:      "Trace tls latency histogram.",
-			Buckets:   []float64{.05, .1, .25, .5},
 		},
 		[]string{"event"},
 	)
@@ -77,8 +49,6 @@ var (
 
 func getClient() *http.Client {
 	if client == nil {
-		// Define functions for the available httptrace.ClientTrace hook
-		// functions that we want to instrument.
 		trace := &promhttp.InstrumentTrace{
 			DNSStart: func(t float64) {
 				dnsLatencyVec.WithLabelValues("dns_start").Observe(t)
@@ -86,12 +56,12 @@ func getClient() *http.Client {
 			DNSDone: func(t float64) {
 				dnsLatencyVec.WithLabelValues("dns_done").Observe(t)
 			},
-			TLSHandshakeStart: func(t float64) {
-				tlsLatencyVec.WithLabelValues("tls_handshake_start").Observe(t)
-			},
-			TLSHandshakeDone: func(t float64) {
-				tlsLatencyVec.WithLabelValues("tls_handshake_done").Observe(t)
-			},
+			// TLSHandshakeStart: func(t float64) {
+			// 	tlsLatencyVec.WithLabelValues("tls_handshake_start").Observe(t)
+			// },
+			// TLSHandshakeDone: func(t float64) {
+			// 	tlsLatencyVec.WithLabelValues("tls_handshake_done").Observe(t)
+			// },
 		}
 
 		// Wrap the default RoundTripper with middleware.
@@ -110,4 +80,84 @@ func getClient() *http.Client {
 	}
 
 	return client
+}
+
+func fill(p pixel) error {
+	u := "http://" + ip + "/fill?colour=" +
+		url.QueryEscape(p.Hex())
+	resp, err := getClient().Get(u)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+func postRaw(p []pixel) error {
+	j, err := json.Marshal(p)
+	if err != nil {
+		return err
+	}
+	u := "http://" + ip + "/raw"
+	body := bytes.NewBuffer(j)
+
+	resp, err := getClient().Post(u, "application/json", body)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
+func clear() error {
+	u := "http://" + ip + "/clear"
+	start := time.Now()
+	resp, err := getClient().Get(u)
+	end := time.Now()
+	delta := end.Sub(start)
+	log.Printf("took %v", delta)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	// fmt.Printf("%+v\n", resp)
+	return nil
+}
+
+func fadeOut(p pixel, d time.Duration) error {
+	return fade(p, mustParseHex("#000000"), d)
+}
+
+func fade(p pixel, toPixel pixel, d time.Duration) error {
+
+	var steps float64
+	var t time.Duration
+	// use a minimum step time of 200ms
+	if d > 600*time.Millisecond {
+		t = 200 * time.Millisecond
+		steps = float64(d / t)
+	} else {
+		steps = 4
+		t = d / time.Duration(steps)
+	}
+
+	fadeStart := time.Now()
+	for i := 1.0; i <= steps; i++ {
+		end := time.Now().Add(t)
+		step := i / steps
+		np := pixel{p.BlendHcl(toPixel.Color, step)}
+		// log.Printf("%v / %v == %v        t%s", i, steps, step, np.Color.Hex())
+		// err := fill(pixel{gamma(np.Color, 0.5)})
+		err := fill(np)
+		if err != nil {
+			return err
+		}
+		left := time.Until(end)
+		// log.Printf("sleeping %v", left)
+		time.Sleep(left)
+	}
+	fadeEnd := time.Now()
+	fadeHist.Observe(fadeEnd.Sub(fadeStart).Seconds())
+	fadeSumm.Observe(fadeEnd.Sub(fadeStart).Seconds())
+	return nil
 }
