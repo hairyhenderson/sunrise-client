@@ -4,6 +4,10 @@ import (
 	"bytes"
 	"log"
 	"net"
+	"net/url"
+	"os"
+	"os/signal"
+	"syscall"
 	"time"
 
 	"github.com/prometheus/common/expfmt"
@@ -26,7 +30,30 @@ func main() {
 	ip = ips[0].String()
 	log.Printf("resolved to %s", ip)
 
-	wait := 100 * time.Millisecond
+	strip := NewPixelStrip(&url.URL{
+		Scheme: "http",
+		Host:   ip,
+	})
+
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, os.Interrupt)
+	signal.Notify(sigs, syscall.SIGTERM)
+
+	go func() {
+		s := <-sigs
+		err := strip.Clear()
+		if err != nil {
+			panic(err)
+		}
+		switch s := s.(type) {
+		case syscall.Signal:
+			os.Exit(128 + int(s))
+		default:
+			os.Exit(1)
+		}
+	}()
+
+	wait := 10 * time.Millisecond
 	for i, c := range colors {
 		var from pixel
 		if i == 0 {
@@ -34,20 +61,20 @@ func main() {
 		} else {
 			from = colors[i-1]
 		}
-		err := fade(from, c, wait)
+		err := strip.Fade(from, c, wait)
 		if err != nil {
 			panic(err)
 		}
 	}
 
-	printMetrics()
-
 	time.Sleep(2 * time.Second)
 	last := colors[len(colors)-1]
-	err = fadeOut(last, 5*time.Second)
+	err = strip.FadeOut(last, 5*time.Second)
 	if err != nil {
 		panic(err)
 	}
+
+	printMetrics()
 }
 
 func printMetrics() {

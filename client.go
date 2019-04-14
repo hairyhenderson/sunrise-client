@@ -2,11 +2,8 @@ package main
 
 import (
 	"bytes"
-	"encoding/json"
-	"log"
 	"net/http"
 	"net/url"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
@@ -14,8 +11,6 @@ import (
 )
 
 var (
-	client *http.Client
-
 	dnsLatencyVec = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "http_client",
@@ -47,8 +42,8 @@ var (
 	)
 )
 
-func getClient() *http.Client {
-	if client == nil {
+func (c *PixelStripClient) getClient() *http.Client {
+	if c.client == nil {
 		trace := &promhttp.InstrumentTrace{
 			DNSStart: func(t float64) {
 				dnsLatencyVec.WithLabelValues("dns_start").Observe(t)
@@ -65,27 +60,37 @@ func getClient() *http.Client {
 		}
 
 		// Wrap the default RoundTripper with middleware.
-		client = &http.Client{
-			Transport:
-			// promhttp.InstrumentRoundTripperInFlight(inFlightGauge,
-			// 	promhttp.InstrumentRoundTripperCounter(counter,
-			promhttp.InstrumentRoundTripperTrace(trace,
+		c.client = &http.Client{
+			Transport: promhttp.InstrumentRoundTripperTrace(trace,
 				promhttp.InstrumentRoundTripperDuration(summVec,
 					promhttp.InstrumentRoundTripperDuration(histVec, http.DefaultTransport),
 				),
 			),
-			// 	),
-			// ),
 		}
 	}
 
-	return client
+	return c.client
 }
 
-func fill(p pixel) error {
-	u := "http://" + ip + "/fill?colour=" +
-		url.QueryEscape(p.Hex())
-	resp, err := getClient().Get(u)
+// PixelStripClient -
+type PixelStripClient struct {
+	url    *url.URL
+	client *http.Client
+}
+
+// Send - send a command without expecting any response
+func (c *PixelStripClient) Send(path string, args map[string]string) error {
+	rel, err := url.Parse(path)
+	if err != nil {
+		return err
+	}
+	u := c.url.ResolveReference(rel)
+	q := u.Query()
+	for k, v := range args {
+		q.Set(k, v)
+	}
+	u.RawQuery = q.Encode()
+	resp, err := c.getClient().Get(u.String())
 	if err != nil {
 		return err
 	}
@@ -93,71 +98,25 @@ func fill(p pixel) error {
 	return nil
 }
 
-func postRaw(p []pixel) error {
-	j, err := json.Marshal(p)
+// SendBody - send a command with a body, without expecting any response
+func (c *PixelStripClient) SendBody(path string, args map[string]string, body []byte) error {
+	buf := bytes.NewBuffer(body)
+
+	rel, err := url.Parse(path)
 	if err != nil {
 		return err
 	}
-	u := "http://" + ip + "/raw"
-	body := bytes.NewBuffer(j)
-
-	resp, err := getClient().Post(u, "application/json", body)
-	if err != nil {
-		return err
+	u := c.url.ResolveReference(rel)
+	q := u.Query()
+	for k, v := range args {
+		q.Set(k, v)
 	}
-	defer resp.Body.Close()
-	return nil
-}
+	u.RawQuery = q.Encode()
 
-func clear() error {
-	u := "http://" + ip + "/clear"
-	start := time.Now()
-	resp, err := getClient().Get(u)
-	end := time.Now()
-	delta := end.Sub(start)
-	log.Printf("took %v", delta)
+	resp, err := c.getClient().Post(u.String(), "application/json", buf)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	// fmt.Printf("%+v\n", resp)
-	return nil
-}
-
-func fadeOut(p pixel, d time.Duration) error {
-	return fade(p, mustParseHex("#000000"), d)
-}
-
-func fade(p pixel, toPixel pixel, d time.Duration) error {
-
-	var steps float64
-	var t time.Duration
-	// use a minimum step time of 200ms
-	if d > 600*time.Millisecond {
-		t = 200 * time.Millisecond
-		steps = float64(d / t)
-	} else {
-		steps = 4
-		t = d / time.Duration(steps)
-	}
-
-	fadeStart := time.Now()
-	for i := 1.0; i <= steps; i++ {
-		end := time.Now().Add(t)
-		step := i / steps
-		np := pixel{p.BlendHcl(toPixel.Color, step)}
-		// log.Printf("%v / %v == %v        t%s", i, steps, step, np.Color.Hex())
-		// err := fill(pixel{gamma(np.Color, 0.5)})
-		err := fill(np)
-		if err != nil {
-			return err
-		}
-		left := time.Until(end)
-		// log.Printf("sleeping %v", left)
-		time.Sleep(left)
-	}
-	fadeEnd := time.Now()
-	fadeHist.Observe(fadeEnd.Sub(fadeStart).Seconds())
-	fadeSumm.Observe(fadeEnd.Sub(fadeStart).Seconds())
 	return nil
 }
